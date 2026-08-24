@@ -5,23 +5,35 @@ import time
 import requests
 import json
 import re
-import google.generativeai as genai
-from openai import OpenAI
 
 # ==========================================
-# 🔑 API キー 読み込み (Streamlit Secrets)
+# 🔑 API 키 로드 (Streamlit Secrets)
 # ==========================================
 GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
-# 1. Google Places APIからデータを取得
+# ------------------------------------------
+# ⚠️ 중요: SDK 교체
+# 기존 `google.generativeai` (구 SDK, deprecated)를
+# 신규 통합 SDK `google-genai` 로 교체합니다.
+#   pip uninstall google-generativeai
+#   pip install google-genai
+# requirements.txt 에도 google-generativeai 를 지우고
+# google-genai 를 추가해야 합니다.
+# ------------------------------------------
+from google import genai as google_genai
+from google.genai import types as google_types
+from openai import OpenAI
+
+
+# 1. Google Places API에서 데이터 가져오기 (기존과 동일)
 def get_google_places_data(search_query):
     url = 'https://places.googleapis.com/v1/places:searchText'
     places_list = []
     headers = {
         'Content-Type': 'application/json',
-        'X-Goog-Api-Key': GOOGLE_API_KEY, 
+        'X-Goog-Api-Key': GOOGLE_API_KEY,
         'X-Goog-FieldMask': 'places.displayName,places.nationalPhoneNumber,nextPageToken'
     }
     data = {'textQuery': search_query, 'languageCode': 'ja'}
@@ -36,7 +48,7 @@ def get_google_places_data(search_query):
             places = result_data.get('places', [])
             for place in places:
                 places_list.append({
-                    '店舗名': place.get('displayName', {}).get('text', '名前なし'),      
+                    '店舗名': place.get('displayName', {}).get('text', '名前なし'),
                     '電話番号': place.get('nationalPhoneNumber', '**なし**'),
                 })
             next_token = result_data.get('nextPageToken')
@@ -52,39 +64,44 @@ def get_google_places_data(search_query):
     status_text.empty()
     return pd.DataFrame(places_list)
 
-# 🌟 2. AI ピュア推薦 (원칙 엄수: 사용자 검색어 외에 어떠한 프롬프트도 추가하지 않음)
+
+# 🌟 2. AI 순수 추천 (사용자 검색어 외 프롬프트 추가 없음 원칙 유지)
+#    -> 두 모델 모두 "실시간 웹 검색 그라운딩"이 실제로 켜지도록 수정
 def get_ai_pure_recommendation(search_query, selected_model):
-    prompt = search_query # 100% 순수 사용자 검색어만 사용
-    
+    prompt = search_query  # 100% 순수 사용자 검색어만 사용
+
     if "gpt" in selected_model:
         client = OpenAI(api_key=OPENAI_API_KEY)
-        response = client.chat.completions.create(
+        # ⚠️ 기존 chat.completions.create() 는 실시간 웹 검색을 전혀 하지 않습니다.
+        #    (학습 데이터로만 답변 -> Google Places 결과와 괴리 발생의 주된 원인)
+        # -> Responses API + web_search 툴로 교체해 실제 그라운딩을 켭니다.
+        response = client.responses.create(
             model=selected_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
+            tools=[{"type": "web_search"}],
+            input=prompt,
         )
-        return response.choices[0].message.content
+        return response.output_text
     else:
-        genai.configure(api_key=GEMINI_API_KEY)
-        
-        # 프롬프트 조작 없이, Gemini 모델 자체의 기능인 '구글 검색 연동'만 켭니다.
-        # 웹 Gemini와 동일한 환경을 API에서 구성하기 위함입니다.
-        try:
-            gemini_model = genai.GenerativeModel(
-                model_name=selected_model,
-                tools=[{"google_search_retrieval": {}}] 
-            )
-            return gemini_model.generate_content(prompt, generation_config={"temperature": 0.7}).text
-        except Exception:
-            # 검색 도구 지원이 안 되는 에러 발생 시, 안전하게 기본 모델로 대체
-            gemini_model = genai.GenerativeModel(selected_model)
-            return gemini_model.generate_content(prompt, generation_config={"temperature": 0.7}).text
+        client = google_genai.Client(api_key=GEMINI_API_KEY)
+        # ⚠️ 기존 코드는 "google_search_retrieval" (Gemini 2.0 미만 문법)을 사용해
+        #    2.0 이상 모델에서 예외가 발생 -> except 에서 검색 없이 조용히 폴백되던 부분.
+        # -> Gemini 2.0 이상 모델의 올바른 그라운딩 툴인 GoogleSearch로 교체.
+        response = client.models.generate_content(
+            model=selected_model,
+            contents=prompt,
+            config=google_types.GenerateContentConfig(
+                temperature=0.7,
+                tools=[google_types.Tool(google_search=google_types.GoogleSearch())],
+            ),
+        )
+        return response.text
 
-# 3. AI 審査員 (지점명 무시 및 강력한 JSON 추출)
+
+# 3. AI 심사원 (지점명 무시 + 안정적인 JSON 추출) - 이 부분은 검색이 필요 없으므로 그대로 둠
 def match_lists_with_ai(df, ai_recommended_text, selected_model):
     shop_names = df['店舗名'].tolist()
     shop_list_text = "\n".join([f"- {name}" for name in shop_names])
-    
+
     prompt = f"""あなたはデータ照合の専門家です。
 
 【基準テキスト（AIが最初に出力したテキスト）】
@@ -115,31 +132,35 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         )
         raw_text = response.choices[0].message.content
     else:
-        genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel(selected_model)
-        raw_text = gemini_model.generate_content(prompt, generation_config={"temperature": 0.0}).text
-    
+        client = google_genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model=selected_model,
+            contents=prompt,
+            config=google_types.GenerateContentConfig(temperature=0.0),
+        )
+        raw_text = response.text
+
     try:
-        # Markdown 기호 등을 제거하여 완벽한 JSON 파싱을 보장합니다.
         clean_text = re.sub(r'```json\s*', '', raw_text, flags=re.IGNORECASE)
         clean_text = re.sub(r'```\s*', '', clean_text)
-        
+
         start_idx = clean_text.find('[')
         end_idx = clean_text.rfind(']') + 1
-        
+
         if start_idx == -1 or end_idx == 0:
             raise ValueError("JSON配列が見つかりません。")
-            
+
         json_str = clean_text[start_idx:end_idx]
         judgements = json.loads(json_str)
         judgement_dict = {item['name']: item['result'] for item in judgements}
-        
+
         df['AI_推薦(🟢/❌)'] = df['店舗名'].apply(lambda x: judgement_dict.get(x, '❌ (判定漏れ)'))
         return df, raw_text
-        
+
     except Exception as e:
         df['AI_推薦(🟢/❌)'] = '⚠️ 解析エラー'
         return df, raw_text
+
 
 def highlight_matched_rows(row):
     if '🟢' in str(row.get('AI_推薦(🟢/❌)', '')):
@@ -148,6 +169,7 @@ def highlight_matched_rows(row):
         return ['color: #FFA500; font-weight: bold;'] * len(row)
     else:
         return [''] * len(row)
+
 
 # 4. Web UI 構成
 st.set_page_config(page_title="地域スポットAI検証システム", layout="wide")
@@ -161,7 +183,7 @@ with col2:
         "推薦リスト作成・審査モデルを選択",
         options=[
             "gpt-4o-mini",
-            "gemini-3.5-flash-lite", 
+            "gemini-3.5-flash-lite",
             "gemini-3.6-flash"
         ]
     )
@@ -175,18 +197,18 @@ if st.button("🚀 検索および検証を実行", type="primary"):
         try:
             with st.spinner('1️⃣ Google Places APIから場所情報を収集しています...'):
                 df_google = get_google_places_data(search_query_input)
-            
+
             if df_google.empty:
                 st.error("Googleの検索結果がありません。")
             else:
-                with st.spinner(f'2️⃣ {model_selection} がAI回答を生成中...'):
+                with st.spinner(f'2️⃣ {model_selection} がAI回答を生成中... (Web検索グラウンディング有効)'):
                     ai_pure_list = get_ai_pure_recommendation(search_query_input, model_selection)
 
                 with st.spinner(f'3️⃣ {model_selection} 審査員が照合中...'):
                     final_df, raw_ai_response = match_lists_with_ai(df_google, ai_pure_list, model_selection)
 
                 st.success(f"✅ 計 {len(final_df)} 件の検証が完了しました！")
-                
+
                 try:
                     styled_df = final_df.style.apply(highlight_matched_rows, axis=1)
                     st.dataframe(styled_df, use_container_width=True)
@@ -196,16 +218,18 @@ if st.button("🚀 検索および検証を実行", type="primary"):
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     final_df.to_excel(writer, index=False, sheet_name='AI_Verification')
-                
+
                 st.download_button(
                     label="📥 Excelファイルをダウンロード (.xlsx)",
                     data=buffer.getvalue(),
                     file_name=f"{search_query_input.replace(' ', '_')}_AI検証結果.xlsx",
                     mime="application/vnd.ms-excel"
                 )
-                
+
                 with st.expander("🤖 AIの実際の回答内容（生のテキスト）を見る"):
                     st.info(ai_pure_list)
-                    
+
         except Exception as e:
+            # ⚠️ 원인 파악을 위해 실제 예외 내용을 보여줌 (기존엔 조용히 삼켜졌음)
             st.error(f"エラーが発生しました: {e}")
+            st.exception(e)

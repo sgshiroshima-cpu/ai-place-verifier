@@ -53,26 +53,30 @@ def get_google_places_data(search_query):
 
 # 2. AI ピュア推薦リスト生成 
 def get_ai_pure_recommendation(search_query, selected_model):
-    prompt = f"「{search_query}」に関連する、あなたが自信を持っておすすめできる有名で美味しいお店を思いつく限りリストアップしてください。余計な説明は省き、店舗名のみを箇条書きで出力してください。"
+    prompt = f"「{search_query}」について、本当に美味しくて有名な定番のおすすめ店や、よく話題になる人気店を教えてください。余計な挨拶は省き、店舗名の一覧を箇条書きで出力してください。"
     
     if "gpt" in selected_model:
         client = OpenAI(api_key=OPENAI_API_KEY)
         response = client.chat.completions.create(
             model=selected_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0
+            messages=[
+                {"role": "system", "content": "あなたは優秀なグルメアシスタントです。"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7 
         )
         return response.choices[0].message.content
     else:
         genai.configure(api_key=GEMINI_API_KEY)
         gemini_model = genai.GenerativeModel(selected_model)
-        return gemini_model.generate_content(prompt, generation_config={"temperature": 0.0}).text
+        return gemini_model.generate_content(prompt, generation_config={"temperature": 0.7}).text
 
-# 3. AI 審査員 スマート照合 (🟢/❌)
+# 🌟 3. AI 審査員 スマート照合 (지점명 무시 규칙 추가!)
 def match_lists_with_ai(df, ai_recommended_text, selected_model):
     shop_names = df['店舗名'].tolist()
     shop_list_text = "\n".join([f"- {name}" for name in shop_names])
     
+    # AI에게 '지점명을 무시하라'는 초강력 룰을 부여했습니다.
     prompt = f"""あなたはデータ照合の専門家です。
 
 【基準リスト（AIが最初におすすめした店舗）】
@@ -81,9 +85,14 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
 【対象リスト（Googleマップの検索結果）】
 {shop_list_text}
 
-対象リストの各店舗について、基準リストのいずれかの店舗と「同一店舗である（表記揺れを考慮）」と判断できる場合は "🟢"、存在しない場合は "❌" と判定してください。
+対象リストの各店舗について、基準リストのいずれかの店舗と「実質的に同じお店（ブランド）」であるか判定してください。
 
-※重要事項※
+※超重要ルールの設定※
+1. 「○○店」「本店」「○○支店」「〜館」などの**支店名・修飾語は完全に無視**してください。（例：「ピザスクール 傘店」と「ピザスクール」は同じとみなす）
+2. コアとなる「メインの店舗名（ブランド名）」が一致していれば、完全に同一店舗とみなして "🟢" を付与してください。
+3. 表記揺れ（ひらがな、カタカナ、漢字の違い、英語表記など）も柔軟に同じとみなしてください。
+4. 基準リストに存在しない全く別の店舗の場合は "❌" と判定してください。
+
 必ず以下のJSON配列形式のみで出力してください。
 [
     {{"name": "対象リストにある店舗名1", "result": "🟢"}},
@@ -95,7 +104,7 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         response = client.chat.completions.create(
             model=selected_model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0
+            temperature=0.0 
         )
         raw_text = response.choices[0].message.content
     else:
@@ -118,11 +127,11 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         st.error(f"AIの回答の解析に失敗しました。(エラー: {e})")
         return df, raw_text
 
-# 🌟 4. 표 색상 하이라이트 함수 수정 (배경색 -> 테두리 및 굵은 글씨)
+# 🌟 4. 표 색상 하이라이트 함수 복구 및 수정
 def highlight_matched_rows(row):
+    # 테두리 스타일이 웹에서 표를 깨뜨리는 현상을 방지하기 위해, 글씨를 진한 초록색으로 굵게 처리합니다.
     if '🟢' in str(row['AI_推薦(🟢/❌)']):
-        # 가독성을 위해 배경색을 없애고, 테두리를 진한 초록색으로 두르며 글씨를 굵게 만듭니다.
-        return ['border: 2px solid #28a745; font-weight: bold;'] * len(row)
+        return ['color: #008000; font-weight: bold;'] * len(row)
     else:
         return [''] * len(row)
 
@@ -164,9 +173,13 @@ if st.button("🚀 検索および検証を実行", type="primary"):
 
                 st.success(f"✅ 計 {len(final_df)} 件の検証が完了しました！")
                 
-                # 🌟 수정된 스타일 함수 적용
-                styled_df = final_df.style.apply(highlight_matched_rows, axis=1)
-                st.dataframe(styled_df, use_container_width=True)
+                # 🌟 오류 방지(Fallback)를 위해 try-except로 표를 출력합니다.
+                try:
+                    styled_df = final_df.style.apply(highlight_matched_rows, axis=1)
+                    st.dataframe(styled_df, use_container_width=True)
+                except Exception as e:
+                    # 스타일 적용 시 에러가 나더라도 원본 표는 무조건 보이도록 안전장치 마련
+                    st.dataframe(final_df, use_container_width=True)
 
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -178,5 +191,9 @@ if st.button("🚀 検索および検証を実行", type="primary"):
                     file_name=f"{search_query_input.replace(' ', '_')}_AI検証結果.xlsx",
                     mime="application/vnd.ms-excel"
                 )
+                
+                with st.expander("🤖 AIが最初に思いついたピュアなリストを見る"):
+                    st.info(ai_pure_list)
+                    
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")

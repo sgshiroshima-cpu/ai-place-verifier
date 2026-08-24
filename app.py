@@ -195,9 +195,9 @@ with col1:
     search_query_input = st.text_input("検索キーワード", placeholder="例: 浅草 焼肉 店")
 with col2:
     model_selection = st.selectbox(
-        "推薦リスト作成・審査モデルを選択",
+        "推薦リスト作成モデルを選択（照合は常にgemini-3.6-flash固定）",
         options=[
-            "gpt-4o-mini",
+            "gpt-5.6-luna",
             "gemini-3.5-flash-lite",
             "gemini-3.6-flash"
         ]

@@ -186,6 +186,34 @@ def highlight_matched_rows(row, target_column):
         return [''] * len(row)
 
 
+# 5. 全回答（1回〜N回分）をまとめて店舗名だけを整理する
+#    -> 複数回検索した結果を必ずすべて反映（1回分だけを見ない）
+#    -> 常にJUDGE_MODEL(gemini-3.6-flash)で整理
+def summarize_shop_names_only(ai_responses):
+    combined_text = "\n\n---\n\n".join(
+        f"[{i + 1}回目の回答]\n{text}" for i, text in enumerate(ai_responses)
+    )
+
+    prompt = f"""以下は同じ検索キーワードに対してAIが複数回に分けて出力した推薦テキストです（全{len(ai_responses)}回分）。
+
+{combined_text}
+
+上記すべての回答に登場する店舗名を対象に、次のルールで整理してください。
+1. 全ての回答を漏れなく確認し、言及されている店舗名を集めてください。
+2. 同じ店舗（支店違い含む）が複数回・複数の回答にまたがって出てきても、重複させず1つにまとめてください。
+3. 店舗名以外の説明文（営業時間やおすすめ理由など）は含めず、店舗名のみを出力してください。
+4. 見やすい番号付きリスト形式で出力してください（例: 1. 店舗名）。
+5. 前置きや後書きの文章は一切不要です。リストのみを出力してください。
+"""
+    client = google_genai.Client(api_key=GEMINI_API_KEY)
+    response = client.models.generate_content(
+        model=JUDGE_MODEL,
+        contents=prompt,
+        config=google_types.GenerateContentConfig(temperature=0.0),
+    )
+    return response.text
+
+
 # 4. Web UI 構成
 st.set_page_config(page_title="地域スポットAI検証システム", layout="wide")
 st.title("📍 地域スポットAI検証システム")
@@ -197,25 +225,32 @@ with col2:
     model_selection = st.selectbox(
         "推薦リスト作成モデルを選択（照合は常にgemini-3.6-flash固定）",
         options=[
-            "gpt-5.6-luna",
-            "gemini-3.5-flash-lite",
-            "gemini-3.6-flash"
+            # GPT-5.6 系列（2026年7月リリース、7/30値下げ）
+            "gpt-5.6-luna",   # 最安：$0.20/$1.20 per 1M tokens
+            "gpt-5.6-terra",  # 中間：$2/$12 per 1M tokens
+            "gpt-5.6-sol",    # 最上位（旗艦）：$5/$30 per 1M tokens
+            # Gemini 3 系列（2026年8月時点の最新Flashライン）
+            "gemini-3.5-flash-lite",  # 最安・低遅延
+            "gemini-3.6-flash",       # バランス型
+            "gemini-3.7-flash",       # 最新・最上位Flash（2026/8/13リリース）
         ]
     )
 
 is_gpt_model = "gpt" in model_selection
 
+# GPTはデフォルト1回（トークン節約）だがスライダーで複数回に増やせる。Geminiはデフォルト3回。
+# key にmodel_selectionを含めることで、モデルを切り替えるたびにデフォルト値が正しく再適用される。
+default_rounds = 1 if is_gpt_model else 3
+num_rounds = st.slider(
+    "🔁 AI再検索の回数（多数決で最終判定）",
+    min_value=1, max_value=5, value=default_rounds, step=1,
+    key=f"num_rounds_{model_selection}",
+    help="同じ検索キーワードでAIに複数回問い合わせ、多数決で最終判定を出します。"
+         "偶数だと同点が出る可能性があるため奇数が安定的です。"
+         "回数を増やすほど精度は上がりますが、API呼び出し回数とコスト・待ち時間も比例して増えます。"
+)
 if is_gpt_model:
-    st.info("💡 ChatGPTモデルはトークン消費を抑えるため、再検索は1回のみ実行されます（多数決なし）。")
-    num_rounds = 1
-else:
-    num_rounds = st.slider(
-        "🔁 AI再検索の回数（多数決で最終判定）",
-        min_value=2, max_value=5, value=3, step=1,
-        help="同じ検索キーワードでAIに複数回問い合わせ、多数決で最終判定を出します。"
-             "偶数だと同点が出る可能性があるため奇数（推奨：3回）が安定的です。"
-             "回数を増やすほど精度は上がりますが、API呼び出し回数とコスト・待ち時間も比例して増えます。"
-    )
+    st.caption("💡 ChatGPTモデルはデフォルト1回（トークン節約）。精度を上げたい場合は回数を増やせます。")
 
 if st.button("🚀 検索および検証を実行", type="primary"):
     if not search_query_input or not search_query_input.strip():
@@ -288,6 +323,15 @@ if st.button("🚀 検索および検証を実行", type="primary"):
                     with cols[i % len(cols)]:
                         with st.expander(f"{i + 1}回目の回答"):
                             st.info(ai_text)
+
+                # ⬇️ 가장 아랫부분: 모든 회차(1回〜num_rounds回)의 AI 응답을 gemini-3.6-flash가
+                #    통합・중복제거해서 점포명만 정리한 리스트
+                with st.spinner(f'4️⃣ {JUDGE_MODEL} が全{num_rounds}回分の回答から店舗名を整理中...'):
+                    shop_name_summary = summarize_shop_names_only(ai_responses)
+
+                st.divider()
+                st.subheader(f"🏪 店舗名のみ整理リスト（{num_rounds}回分の回答を統合・重複排除／{JUDGE_MODEL}）")
+                st.markdown(shop_name_summary)
 
         except Exception as e:
             # ⚠️ 원인 파악을 위해 실제 예외 내용을 보여줌 (기존엔 조용히 삼켜졌음)

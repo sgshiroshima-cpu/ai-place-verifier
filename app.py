@@ -52,23 +52,45 @@ def get_google_places_data(search_query):
     status_text.empty()
     return pd.DataFrame(places_list)
 
-# 🌟 2. AI ピュア推薦 (원래 의도대로 사용자의 검색어만 순수하게 전달)
+# 🌟 2. AI ピュア推薦 (웹 AI와의 차이를 줄이기 위한 시스템 방어막 추가)
 def get_ai_pure_recommendation(search_query, selected_model):
-    prompt = search_query # 어떠한 수식어나 가이드도 없이 검색어만 100% 전달합니다.
+    # 사용자의 입력(search_query)은 건드리지 않되, AI의 성격을 엄격하게 통제합니다.
+    system_instruction = (
+        "あなたは最新情報を提供するWebのAIアシスタントです。"
+        "ユーザーからの検索キーワードに対して、現在【実際に存在する正確な店舗名】のみを回答してください。"
+        "過去の記憶で架空の店舗を創作したり、閉業した店舗を含めることは絶対にやめてください。"
+    )
     
     if "gpt" in selected_model:
         client = OpenAI(api_key=OPENAI_API_KEY)
         response = client.chat.completions.create(
             model=selected_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
+            messages=[
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": search_query}
+            ],
+            temperature=0.1 # 창의성을 죽이고 사실(Fact) 기반으로만 답변하도록 0.1로 고정
         )
         return response.choices[0].message.content
     else:
         genai.configure(api_key=GEMINI_API_KEY)
-        # 에러를 유발하던 억지 도구(tools) 설정을 제거하고 가장 안정적인 형태로 호출합니다.
-        gemini_model = genai.GenerativeModel(selected_model)
-        return gemini_model.generate_content(prompt, generation_config={"temperature": 0.7}).text
+        
+        # 에러 방지를 위한 Try-Except 구조 (에러가 나도 앱이 죽지 않고 실행됨)
+        try:
+            # 1순위: 구글 실시간 검색(Grounding)을 켜서 웹 Gemini와 동일한 효과를 노림
+            gemini_model = genai.GenerativeModel(
+                model_name=selected_model,
+                system_instruction=system_instruction,
+                tools='google_search_retrieval' 
+            )
+            return gemini_model.generate_content(search_query, generation_config={"temperature": 0.1}).text
+        except Exception as e:
+            # 2순위: 만약 선택한 모델(3.5-lite 등)이 tools를 지원하지 않아 에러가 나면, tools만 빼고 다시 실행
+            gemini_model_fallback = genai.GenerativeModel(
+                model_name=selected_model,
+                system_instruction=system_instruction
+            )
+            return gemini_model_fallback.generate_content(search_query, generation_config={"temperature": 0.1}).text
 
 # 3. AI 審査員 (지점명 무시 및 강력한 JSON 추출 유지)
 def match_lists_with_ai(df, ai_recommended_text, selected_model):

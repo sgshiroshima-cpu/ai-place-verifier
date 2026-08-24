@@ -52,47 +52,35 @@ def get_google_places_data(search_query):
     status_text.empty()
     return pd.DataFrame(places_list)
 
-# 🌟 2. AI ピュア推薦 (웹 AI와의 차이를 줄이기 위한 시스템 방어막 추가)
+# 🌟 2. AI ピュア推薦 (원칙 엄수: 사용자 검색어 외에 어떠한 프롬프트도 추가하지 않음)
 def get_ai_pure_recommendation(search_query, selected_model):
-    # 사용자의 입력(search_query)은 건드리지 않되, AI의 성격을 엄격하게 통제합니다.
-    system_instruction = (
-        "あなたは最新情報を提供するWebのAIアシスタントです。"
-        "ユーザーからの検索キーワードに対して、現在【実際に存在する正確な店舗名】のみを回答してください。"
-        "過去の記憶で架空の店舗を創作したり、閉業した店舗を含めることは絶対にやめてください。"
-    )
+    prompt = search_query # 100% 순수 사용자 검색어만 사용
     
     if "gpt" in selected_model:
         client = OpenAI(api_key=OPENAI_API_KEY)
         response = client.chat.completions.create(
             model=selected_model,
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": search_query}
-            ],
-            temperature=0.1 # 창의성을 죽이고 사실(Fact) 기반으로만 답변하도록 0.1로 고정
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
         )
         return response.choices[0].message.content
     else:
         genai.configure(api_key=GEMINI_API_KEY)
         
-        # 에러 방지를 위한 Try-Except 구조 (에러가 나도 앱이 죽지 않고 실행됨)
+        # 프롬프트 조작 없이, Gemini 모델 자체의 기능인 '구글 검색 연동'만 켭니다.
+        # 웹 Gemini와 동일한 환경을 API에서 구성하기 위함입니다.
         try:
-            # 1순위: 구글 실시간 검색(Grounding)을 켜서 웹 Gemini와 동일한 효과를 노림
             gemini_model = genai.GenerativeModel(
                 model_name=selected_model,
-                system_instruction=system_instruction,
-                tools='google_search_retrieval' 
+                tools=[{"google_search_retrieval": {}}] 
             )
-            return gemini_model.generate_content(search_query, generation_config={"temperature": 0.1}).text
-        except Exception as e:
-            # 2순위: 만약 선택한 모델(3.5-lite 등)이 tools를 지원하지 않아 에러가 나면, tools만 빼고 다시 실행
-            gemini_model_fallback = genai.GenerativeModel(
-                model_name=selected_model,
-                system_instruction=system_instruction
-            )
-            return gemini_model_fallback.generate_content(search_query, generation_config={"temperature": 0.1}).text
+            return gemini_model.generate_content(prompt, generation_config={"temperature": 0.7}).text
+        except Exception:
+            # 검색 도구 지원이 안 되는 에러 발생 시, 안전하게 기본 모델로 대체
+            gemini_model = genai.GenerativeModel(selected_model)
+            return gemini_model.generate_content(prompt, generation_config={"temperature": 0.7}).text
 
-# 3. AI 審査員 (지점명 무시 및 강력한 JSON 추출 유지)
+# 3. AI 審査員 (지점명 무시 및 강력한 JSON 추출)
 def match_lists_with_ai(df, ai_recommended_text, selected_model):
     shop_names = df['店舗名'].tolist()
     shop_list_text = "\n".join([f"- {name}" for name in shop_names])
@@ -132,7 +120,7 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         raw_text = gemini_model.generate_content(prompt, generation_config={"temperature": 0.0}).text
     
     try:
-        # Markdown 포맷 제거 등 JSON 파싱 안정화 코드는 유지합니다.
+        # Markdown 기호 등을 제거하여 완벽한 JSON 파싱을 보장합니다.
         clean_text = re.sub(r'```json\s*', '', raw_text, flags=re.IGNORECASE)
         clean_text = re.sub(r'```\s*', '', clean_text)
         

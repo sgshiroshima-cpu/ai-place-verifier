@@ -118,13 +118,20 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         st.error(f"AIの回答の解析に失敗しました。(エラー: {e})")
         return df, raw_text
 
-# 4. Web UI 構成
+# 🌟 4. 표 색상 하이라이트 함수 추가
+def highlight_matched_rows(row):
+    # '🟢' 기호가 포함된 행의 배경색을 연한 초록색(#e6ffe6)으로 변경합니다.
+    if '🟢' in str(row['AI_推薦(🟢/❌)']):
+        return ['background-color: #e6ffe6'] * len(row)
+    else:
+        return [''] * len(row)
+
+# 5. Web UI 構成
 st.set_page_config(page_title="地域スポットAI検証システム", layout="wide")
 st.title("📍 地域スポットAI検証システム (ピュア推薦マッチング)")
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    # 🌟 수정된 부분: value를 지우고 placeholder를 추가했습니다.
     search_query_input = st.text_input("検索キーワード", placeholder="例: 浅草 焼肉 店")
 with col2:
     model_selection = st.selectbox(
@@ -137,7 +144,6 @@ with col2:
     )
 
 if st.button("🚀 検索および検証を実行", type="primary"):
-    # 🌟 수정된 부분: 빈칸으로 검색할 경우 경고를 띄웁니다.
     if not search_query_input or not search_query_input.strip():
         st.warning("⚠️ 検索キーワードを入力してください！ (검색어를 입력해 주세요!)")
     elif not GOOGLE_API_KEY or (not GEMINI_API_KEY and not OPENAI_API_KEY):
@@ -157,9 +163,13 @@ if st.button("🚀 検索および検証を実行", type="primary"):
                     final_df, raw_ai_response = match_lists_with_ai(df_google, ai_pure_list, model_selection)
 
                 st.success(f"✅ 計 {len(final_df)} 件の検証が完了しました！")
-                st.dataframe(final_df, use_container_width=True)
+                
+                # 🌟 데이터프레임에 하이라이트 스타일을 적용하여 화면에 출력합니다.
+                styled_df = final_df.style.apply(highlight_matched_rows, axis=1)
+                st.dataframe(styled_df, use_container_width=True)
 
                 buffer = io.BytesIO()
+                # 엑셀 파일에도 스타일을 반영하려면 조금 복잡해지므로, 엑셀은 원본 데이터를 저장합니다.
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     final_df.to_excel(writer, index=False, sheet_name='AI_Verification')
                 

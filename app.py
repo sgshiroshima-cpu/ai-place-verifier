@@ -12,7 +12,7 @@ import re
 GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
-
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", "")
 # ------------------------------------------
 # ⚠️ 중요: SDK 교체
 # 기존 `google.generativeai` (구 SDK, deprecated)를
@@ -25,6 +25,27 @@ OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 from google import genai as google_genai
 from google.genai import types as google_types
 from openai import OpenAI
+
+def check_password():
+    def password_entered():
+        if st.session_state["password"] == APP_PASSWORD:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.text_input("🔐 プログラムを使用するためのパスワードを入力してください", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.text_input("🔐 プログラムを使用するためのパスワードを入力してください", type="password", on_change=password_entered, key="password")
+        st.error("⚠️ パスワードが間違っています。")
+        return False
+
+    return True
+
+if not check_password():
+    st.stop()
 
 # ⚠️ 검색 결과 매칭(심사)은 항상 이 모델로 고정 실행합니다.
 #    (검색/추천 생성 모델과는 별개 — 매칭 품질을 일정하게 유지하기 위함)

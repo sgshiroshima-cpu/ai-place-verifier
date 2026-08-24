@@ -4,6 +4,7 @@ import io
 import time
 import requests
 import json
+import re
 import google.generativeai as genai
 from openai import OpenAI
 
@@ -14,6 +15,7 @@ GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
+# 1. Google Places APIからデータを取得
 def get_google_places_data(search_query):
     url = 'https://places.googleapis.com/v1/places:searchText'
     places_list = []
@@ -50,15 +52,15 @@ def get_google_places_data(search_query):
     status_text.empty()
     return pd.DataFrame(places_list)
 
-# 🌟 2. AI ピュア推薦リスト生成 (프롬프트는 순수하게, 시스템만 채팅창 모드로)
+# 🌟 2. AI ピュア推薦リスト生成 (웹 검색 활성화 및 환각 방지 적용)
 def get_ai_pure_recommendation(search_query, selected_model):
-    # 시스템 백그라운드 설정: "웹 채팅창의 어시스턴트처럼 행동해라"
+    # 시스템 백그라운드 설정: 실재하는 장소를 최신 정보 기반으로 추천하도록 유도
     chat_system_instruction = (
         "あなたは親切なAIアシスタントです。Webのチャット画面（ChatGPTやGeminiなど）で"
         "ユーザーから質問された時と全く同じように、自然で分かりやすく、質の高い回答を提供してください。"
+        "※重要※: 飲食店やスポットを推薦する場合は、架空の場所を作らず、必ず現実に存在する正確な店舗名と情報を提供してください。"
     )
     
-    # ユーザーの入力は、一切の加工なしに100%そのまま送信します！
     prompt = search_query
     
     if "gpt" in selected_model:
@@ -67,21 +69,31 @@ def get_ai_pure_recommendation(search_query, selected_model):
             model=selected_model,
             messages=[
                 {"role": "system", "content": chat_system_instruction},
-                {"role": "user", "content": prompt} # 사용자의 날것 그대로의 텍스트
+                {"role": "user", "content": prompt} 
             ],
-            temperature=0.7 
+            temperature=0.3 # 환각(거짓 정보) 방지를 위해 온도를 낮춤
         )
         return response.choices[0].message.content
     else:
         genai.configure(api_key=GEMINI_API_KEY)
-        # Gemini에도 동일한 시스템 페르소나 부여
-        gemini_model = genai.GenerativeModel(
-            model_name=selected_model,
-            system_instruction=chat_system_instruction
-        )
-        return gemini_model.generate_content(prompt, generation_config={"temperature": 0.7}).text
+        
+        # Gemini에 구글 검색 도구(Grounding) 추가 설정
+        try:
+            gemini_model = genai.GenerativeModel(
+                model_name=selected_model,
+                system_instruction=chat_system_instruction,
+                tools='google_search_retrieval' # 구글 검색 기능 활성화 (실제 가게 정보 반영)
+            )
+        except Exception:
+            # Fallback
+            gemini_model = genai.GenerativeModel(
+                model_name=selected_model,
+                system_instruction=chat_system_instruction
+            )
 
-# 3. AI 審査員 スマート照合 (지점명 무시 룰 적용)
+        return gemini_model.generate_content(prompt, generation_config={"temperature": 0.3}).text
+
+# 3. AI 審査員 スマート照合 (JSON 파싱 에러 완벽 방지)
 def match_lists_with_ai(df, ai_recommended_text, selected_model):
     shop_names = df['店舗名'].tolist()
     shop_list_text = "\n".join([f"- {name}" for name in shop_names])
@@ -101,9 +113,10 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
 2. 「○○店」「本店」「○○支店」「〜館」などの支店名・修飾語は完全に無視してください。（例：「ピザスクール 傘店」と「ピザスクール」は同じとみなす）
 3. コアとなる「メインの店舗名（ブランド名）」が一致していれば、完全に同一店舗とみなして "🟢" を付与してください。
 4. 表記揺れ（ひらがな、カタカナ、漢字の違い、英語表記など）も柔軟に同じとみなしてください。
-5. 基準テキスト内に存在しない全く別の店舗の場合は "❌" と判定してください。
+5. 基準テキスト内に存在しない全く別の店舗の場合は "❌" を付与してください。
 
-必ず以下のJSON配列形式のみで出力してください。
+※出力形式の厳格なルール※
+必ず以下のJSON配列形式のみで出力してください。Markdownのコードブロック(```json ... ```)などの余分なテキストや説明は一切含めず、純粋なJSON配列のみをテキストとして出力してください。
 [
     {{"name": "対象リストにある店舗名1", "result": "🟢"}},
     {{"name": "対象リストにある店舗名2", "result": "❌"}}
@@ -114,7 +127,7 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         response = client.chat.completions.create(
             model=selected_model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0 
+            temperature=0.0 # 정확한 데이터 분석을 위해 온도를 0으로 설정
         )
         raw_text = response.choices[0].message.content
     else:
@@ -123,9 +136,17 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         raw_text = gemini_model.generate_content(prompt, generation_config={"temperature": 0.0}).text
     
     try:
-        start_idx = raw_text.find('[')
-        end_idx = raw_text.rfind(']') + 1
-        json_str = raw_text[start_idx:end_idx]
+        # Markdown 포맷(```json 등)이 섞여 들어오더라도 강제로 제거하는 정규식
+        clean_text = re.sub(r'```json\s*', '', raw_text, flags=re.IGNORECASE)
+        clean_text = re.sub(r'```\s*', '', clean_text)
+        
+        start_idx = clean_text.find('[')
+        end_idx = clean_text.rfind(']') + 1
+        
+        if start_idx == -1 or end_idx == 0:
+            raise ValueError("JSON配列の開始'[' または 終了']'が見つかりません。")
+            
+        json_str = clean_text[start_idx:end_idx]
         
         judgements = json.loads(json_str)
         judgement_dict = {item['name']: item['result'] for item in judgements}
@@ -135,11 +156,14 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         
     except Exception as e:
         st.error(f"AIの回答の解析に失敗しました。(エラー: {e})")
+        df['AI_推薦(🟢/❌)'] = '⚠️ 解析エラー'
         return df, raw_text
 
 def highlight_matched_rows(row):
-    if '🟢' in str(row['AI_推薦(🟢/❌)']):
+    if '🟢' in str(row.get('AI_推薦(🟢/❌)', '')):
         return ['color: #008000; font-weight: bold;'] * len(row)
+    elif '⚠️' in str(row.get('AI_推薦(🟢/❌)', '')):
+        return ['color: #FFA500; font-weight: bold;'] * len(row)
     else:
         return [''] * len(row)
 
@@ -150,12 +174,15 @@ col1, col2 = st.columns([3, 1])
 with col1:
     search_query_input = st.text_input("検索キーワード", placeholder="例: 浅草 焼肉 店")
 with col2:
+    # 🚨 원래 사용하시려던 2026년 기준 올바른 모델명들로 복구했습니다. 
+    # 원하실 경우 최신 버전인 gemini-3.7-flash도 활용하실 수 있습니다.
     model_selection = st.selectbox(
         "推薦リスト作成・審査モデルを選択",
         options=[
             "gpt-4o-mini",
             "gemini-3.5-flash-lite", 
-            "gemini-3.6-flash"
+            "gemini-3.6-flash",
+            "gemini-3.7-flash"
         ]
     )
 

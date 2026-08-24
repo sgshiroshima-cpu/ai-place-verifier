@@ -14,7 +14,6 @@ GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
-# 1. Google Places API 連携関数
 def get_google_places_data(search_query):
     url = 'https://places.googleapis.com/v1/places:searchText'
     places_list = []
@@ -51,25 +50,38 @@ def get_google_places_data(search_query):
     status_text.empty()
     return pd.DataFrame(places_list)
 
-# 🌟 2. AI ピュア推薦リスト生成 (어떤 수식어/조건도 없이 검색어 자체만 던짐)
+# 🌟 2. AI ピュア推薦リスト生成 (프롬프트는 순수하게, 시스템만 채팅창 모드로)
 def get_ai_pure_recommendation(search_query, selected_model):
-    # 사용자가 입력한 텍스트 100% 그대로가 프롬프트가 됩니다.
+    # 시스템 백그라운드 설정: "웹 채팅창의 어시스턴트처럼 행동해라"
+    chat_system_instruction = (
+        "あなたは親切なAIアシスタントです。Webのチャット画面（ChatGPTやGeminiなど）で"
+        "ユーザーから質問された時と全く同じように、自然で分かりやすく、質の高い回答を提供してください。"
+    )
+    
+    # ユーザーの入力は、一切の加工なしに100%そのまま送信します！
     prompt = search_query
     
     if "gpt" in selected_model:
         client = OpenAI(api_key=OPENAI_API_KEY)
         response = client.chat.completions.create(
             model=selected_model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": chat_system_instruction},
+                {"role": "user", "content": prompt} # 사용자의 날것 그대로의 텍스트
+            ],
             temperature=0.7 
         )
         return response.choices[0].message.content
     else:
         genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel(selected_model)
+        # Gemini에도 동일한 시스템 페르소나 부여
+        gemini_model = genai.GenerativeModel(
+            model_name=selected_model,
+            system_instruction=chat_system_instruction
+        )
         return gemini_model.generate_content(prompt, generation_config={"temperature": 0.7}).text
 
-# 3. AI 審査員 スマート照合
+# 3. AI 審査員 スマート照合 (지점명 무시 룰 적용)
 def match_lists_with_ai(df, ai_recommended_text, selected_model):
     shop_names = df['店舗名'].tolist()
     shop_list_text = "\n".join([f"- {name}" for name in shop_names])
@@ -125,14 +137,12 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         st.error(f"AIの回答の解析に失敗しました。(エラー: {e})")
         return df, raw_text
 
-# 4. 표 색상 하이라이트 함수
 def highlight_matched_rows(row):
     if '🟢' in str(row['AI_推薦(🟢/❌)']):
         return ['color: #008000; font-weight: bold;'] * len(row)
     else:
         return [''] * len(row)
 
-# 5. Web UI 構成
 st.set_page_config(page_title="地域スポットAI検証システム", layout="wide")
 st.title("📍 地域スポットAI検証システム (ピュア推薦マッチング)")
 
@@ -187,7 +197,6 @@ if st.button("🚀 検索および検証を実行", type="primary"):
                     mime="application/vnd.ms-excel"
                 )
                 
-                # AI가 검색어에 대해 실제로 대답한 '날것 그대로의 문장'을 확인할 수 있습니다.
                 with st.expander("🤖 AIの実際の回答内容（生のテキスト）を見る"):
                     st.info(ai_pure_list)
                     

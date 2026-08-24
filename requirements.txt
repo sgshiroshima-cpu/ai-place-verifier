@@ -1,6 +1,6 @@
 streamlit
 pandas
 requests
-google-generativeai
-openai
 xlsxwriter
+openai
+google-genai

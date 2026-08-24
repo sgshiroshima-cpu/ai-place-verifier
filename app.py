@@ -227,12 +227,9 @@ with col2:
         options=[
             # GPT-5.6 系列（2026年7月リリース、7/30値下げ）
             "gpt-5.6-luna",   # 最安：$0.20/$1.20 per 1M tokens
-            "gpt-5.6-terra",  # 中間：$2/$12 per 1M tokens
-            "gpt-5.6-sol",    # 最上位（旗艦）：$5/$30 per 1M tokens
             # Gemini 3 系列（2026年8月時点の最新Flashライン）
             "gemini-3.5-flash-lite",  # 最安・低遅延
             "gemini-3.6-flash",       # バランス型
-            "gemini-3.7-flash",       # 最新・最上位Flash（2026/8/13リリース）
         ]
     )
 

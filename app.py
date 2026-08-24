@@ -98,7 +98,8 @@ def get_ai_pure_recommendation(search_query, selected_model):
 
 
 # 3. AI 심사원 (지점명 무시 + 안정적인 JSON 추출) - 이 부분은 검색이 필요 없으므로 그대로 둠
-def match_lists_with_ai(df, ai_recommended_text, selected_model):
+#    result_column: 같은 검색어를 여러 번 돌려서 비교할 때 회차별로 다른 컬럼에 저장하기 위한 파라미터
+def match_lists_with_ai(df, ai_recommended_text, selected_model, result_column='AI_推薦(🟢/❌)'):
     shop_names = df['店舗名'].tolist()
     shop_list_text = "\n".join([f"- {name}" for name in shop_names])
 
@@ -154,18 +155,29 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         judgements = json.loads(json_str)
         judgement_dict = {item['name']: item['result'] for item in judgements}
 
-        df['AI_推薦(🟢/❌)'] = df['店舗名'].apply(lambda x: judgement_dict.get(x, '❌ (判定漏れ)'))
+        df[result_column] = df['店舗名'].apply(lambda x: judgement_dict.get(x, '❌ (判定漏れ)'))
         return df, raw_text
 
     except Exception as e:
-        df['AI_推薦(🟢/❌)'] = '⚠️ 解析エラー'
+        df[result_column] = '⚠️ 解析エラー'
         return df, raw_text
 
 
-def highlight_matched_rows(row):
-    if '🟢' in str(row.get('AI_推薦(🟢/❌)', '')):
+# 2回分の判定を통합: 어느 한 회차에서라도 🟢이면 최종 🟢 (합집합 기준 비교)
+def combine_rounds(row, round_columns):
+    values = [str(row.get(col, '')) for col in round_columns]
+    if any('🟢' in v for v in values):
+        return '🟢'
+    if any('⚠️' in v for v in values):
+        return '⚠️'
+    return '❌'
+
+
+def highlight_matched_rows(row, target_column):
+    val = str(row.get(target_column, ''))
+    if '🟢' in val:
         return ['color: #008000; font-weight: bold;'] * len(row)
-    elif '⚠️' in str(row.get('AI_推薦(🟢/❌)', '')):
+    elif '⚠️' in val:
         return ['color: #FFA500; font-weight: bold;'] * len(row)
     else:
         return [''] * len(row)
@@ -201,16 +213,43 @@ if st.button("🚀 検索および検証を実行", type="primary"):
             if df_google.empty:
                 st.error("Googleの検索結果がありません。")
             else:
-                with st.spinner(f'2️⃣ {model_selection} がAI回答を生成中... (Web検索グラウンディング有効)'):
-                    ai_pure_list = get_ai_pure_recommendation(search_query_input, model_selection)
+                # 同じプロンプトを2回に分けて実行し、両方の結果を取得・比較する
+                with st.spinner(f'2️⃣-1 {model_selection} がAI回答を生成中... (1回目)'):
+                    ai_pure_list_1 = get_ai_pure_recommendation(search_query_input, model_selection)
 
-                with st.spinner(f'3️⃣ {model_selection} 審査員が照合中...'):
-                    final_df, raw_ai_response = match_lists_with_ai(df_google, ai_pure_list, model_selection)
+                with st.spinner(f'2️⃣-2 {model_selection} がAI回答を生成中... (2回目)'):
+                    ai_pure_list_2 = get_ai_pure_recommendation(search_query_input, model_selection)
 
-                st.success(f"✅ 計 {len(final_df)} 件の検証が完了しました！")
+                col_1st = '1回目_判定'
+                col_2nd = '2回目_判定'
+                col_final = '最終判定(統合🟢/❌)'
+
+                with st.spinner(f'3️⃣-1 {model_selection} 審査員が照合中... (1回目結果を基準)'):
+                    final_df, raw_ai_response_1 = match_lists_with_ai(
+                        df_google, ai_pure_list_1, model_selection, result_column=col_1st
+                    )
+
+                with st.spinner(f'3️⃣-2 {model_selection} 審査員が照合中... (2回目結果を基準)'):
+                    final_df, raw_ai_response_2 = match_lists_with_ai(
+                        final_df, ai_pure_list_2, model_selection, result_column=col_2nd
+                    )
+
+                # 두 회차 중 어느 한쪽이라도 🟢이면 최종 🟢 (합집합) — 필요시 기준 조정 가능
+                final_df[col_final] = final_df.apply(
+                    lambda row: combine_rounds(row, [col_1st, col_2nd]), axis=1
+                )
+
+                st.success(f"✅ 計 {len(final_df)} 件の検証が完了しました！（2回分の結果を比較・統合済み）")
+
+                # 1回目と2回目で判定が食い違った店舗（一貫性チェック）
+                mismatch_df = final_df[final_df[col_1st] != final_df[col_2nd]]
+                if not mismatch_df.empty:
+                    st.warning(f"⚠️ 1回目と2回目で判定が異なる店舗が {len(mismatch_df)} 件あります（下の表で確認できます）。")
 
                 try:
-                    styled_df = final_df.style.apply(highlight_matched_rows, axis=1)
+                    styled_df = final_df.style.apply(
+                        lambda row: highlight_matched_rows(row, col_final), axis=1
+                    )
                     st.dataframe(styled_df, use_container_width=True)
                 except Exception:
                     st.dataframe(final_df, use_container_width=True)
@@ -226,8 +265,13 @@ if st.button("🚀 検索および検証を実行", type="primary"):
                     mime="application/vnd.ms-excel"
                 )
 
-                with st.expander("🤖 AIの実際の回答内容（生のテキスト）を見る"):
-                    st.info(ai_pure_list)
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    with st.expander("🤖 AIの実際の回答内容 - 1回目（生のテキスト）"):
+                        st.info(ai_pure_list_1)
+                with col_b:
+                    with st.expander("🤖 AIの実際の回答内容 - 2回目（生のテキスト）"):
+                        st.info(ai_pure_list_2)
 
         except Exception as e:
             # ⚠️ 원인 파악을 위해 실제 예외 내용을 보여줌 (기존엔 조용히 삼켜졌음)

@@ -118,11 +118,11 @@ def match_lists_with_ai(df, ai_recommended_text, selected_model):
         st.error(f"AIの回答の解析に失敗しました。(エラー: {e})")
         return df, raw_text
 
-# 🌟 4. 표 색상 하이라이트 함수 추가
+# 🌟 4. 표 색상 하이라이트 함수 수정 (배경색 -> 테두리 및 굵은 글씨)
 def highlight_matched_rows(row):
-    # '🟢' 기호가 포함된 행의 배경색을 연한 초록색(#e6ffe6)으로 변경합니다.
     if '🟢' in str(row['AI_推薦(🟢/❌)']):
-        return ['background-color: #e6ffe6'] * len(row)
+        # 가독성을 위해 배경색을 없애고, 테두리를 진한 초록색으로 두르며 글씨를 굵게 만듭니다.
+        return ['border: 2px solid #28a745; font-weight: bold;'] * len(row)
     else:
         return [''] * len(row)
 
@@ -164,12 +164,11 @@ if st.button("🚀 検索および検証を実行", type="primary"):
 
                 st.success(f"✅ 計 {len(final_df)} 件の検証が完了しました！")
                 
-                # 🌟 데이터프레임에 하이라이트 스타일을 적용하여 화면에 출력합니다.
+                # 🌟 수정된 스타일 함수 적용
                 styled_df = final_df.style.apply(highlight_matched_rows, axis=1)
                 st.dataframe(styled_df, use_container_width=True)
 
                 buffer = io.BytesIO()
-                # 엑셀 파일에도 스타일을 반영하려면 조금 복잡해지므로, 엑셀은 원본 데이터를 저장합니다.
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     final_df.to_excel(writer, index=False, sheet_name='AI_Verification')
                 

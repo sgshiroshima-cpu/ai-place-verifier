@@ -14,7 +14,7 @@ GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 
-# 1. Google Places API 連携関数 (기존과 동일)
+# 1. Google Places API 連携関数
 def get_google_places_data(search_query):
     url = 'https://places.googleapis.com/v1/places:searchText'
     places_list = []
@@ -51,7 +51,7 @@ def get_google_places_data(search_query):
     status_text.empty()
     return pd.DataFrame(places_list)
 
-# 2. AI ピュア推薦リスト生成 (ChatGPT 호환)
+# 2. AI ピュア推薦リスト生成 
 def get_ai_pure_recommendation(search_query, selected_model):
     prompt = f"「{search_query}」に関連する、あなたが自信を持っておすすめできる有名で美味しいお店を思いつく限りリストアップしてください。余計な説明は省き、店舗名のみを箇条書きで出力してください。"
     
@@ -68,8 +68,8 @@ def get_ai_pure_recommendation(search_query, selected_model):
         gemini_model = genai.GenerativeModel(selected_model)
         return gemini_model.generate_content(prompt, generation_config={"temperature": 0.0}).text
 
-# 3. AI 審査員 スマート照合 (🟢/❌ 기호 적용 및 ChatGPT 호환)
-def match_lists_with_ai(df, ai_recommended_text, fixed_model):
+# 3. AI 審査員 スマート照合 (🟢/❌)
+def match_lists_with_ai(df, ai_recommended_text, selected_model):
     shop_names = df['店舗名'].tolist()
     shop_list_text = "\n".join([f"- {name}" for name in shop_names])
     
@@ -90,17 +90,17 @@ def match_lists_with_ai(df, ai_recommended_text, fixed_model):
     {{"name": "対象リストにある店舗名2", "result": "❌"}}
 ]
 """
-    if "gpt" in fixed_model:
+    if "gpt" in selected_model:
         client = OpenAI(api_key=OPENAI_API_KEY)
         response = client.chat.completions.create(
-            model=fixed_model,
+            model=selected_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0
         )
         raw_text = response.choices[0].message.content
     else:
         genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel(fixed_model)
+        gemini_model = genai.GenerativeModel(selected_model)
         raw_text = gemini_model.generate_content(prompt, generation_config={"temperature": 0.0}).text
     
     try:
@@ -124,11 +124,11 @@ st.title("📍 地域スポットAI検証システム (ピュア推薦マッチ�
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    search_query_input = st.text_input("検索キーワード", value="浅草 焼肉 店")
+    # 🌟 수정된 부분: value를 지우고 placeholder를 추가했습니다.
+    search_query_input = st.text_input("検索キーワード", placeholder="例: 浅草 焼肉 店")
 with col2:
-    # 옵션에 gpt-4o-mini 추가
     model_selection = st.selectbox(
-        "推薦リスト作成モデルを選択",
+        "推薦リスト作成・審査モデルを選択",
         options=[
             "gpt-4o-mini",
             "gemini-3.5-flash-lite", 
@@ -137,7 +137,10 @@ with col2:
     )
 
 if st.button("🚀 検索および検証を実行", type="primary"):
-    if not GOOGLE_API_KEY or (not GEMINI_API_KEY and not OPENAI_API_KEY):
+    # 🌟 수정된 부분: 빈칸으로 검색할 경우 경고를 띄웁니다.
+    if not search_query_input or not search_query_input.strip():
+        st.warning("⚠️ 検索キーワードを入力してください！ (검색어를 입력해 주세요!)")
+    elif not GOOGLE_API_KEY or (not GEMINI_API_KEY and not OPENAI_API_KEY):
         st.error("⚠️ Streamlit Secrets に APIキーが設定されていません！")
     else:
         try:
@@ -150,10 +153,8 @@ if st.button("🚀 検索および検証を実行", type="primary"):
                 with st.spinner(f'2️⃣ {model_selection} がおすすめリストを作成中...'):
                     ai_pure_list = get_ai_pure_recommendation(search_query_input, model_selection)
 
-                # 2차 판독기도 gpt-4o-mini로 고정
-                fixed_judge_model = "gpt-4o-mini" 
-                with st.spinner(f'3️⃣ {fixed_judge_model} 審査員が照合中...'):
-                    final_df, raw_ai_response = match_lists_with_ai(df_google, ai_pure_list, fixed_judge_model)
+                with st.spinner(f'3️⃣ {model_selection} 審査員が照合中...'):
+                    final_df, raw_ai_response = match_lists_with_ai(df_google, ai_pure_list, model_selection)
 
                 st.success(f"✅ 計 {len(final_df)} 件の検証が完了しました！")
                 st.dataframe(final_df, use_container_width=True)

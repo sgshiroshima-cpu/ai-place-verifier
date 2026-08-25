@@ -258,111 +258,172 @@ def summarize_shop_names_only(ai_responses):
 st.set_page_config(page_title="地域スポットAI検証システム", layout="wide")
 st.title("📍 地域スポットAI検証システム")
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    search_query_input = st.text_input("検索キーワード", placeholder="例: 浅草 焼肉 店")
-with col2:
-    model_selection = st.selectbox(
-        "推薦リスト作成モデルを選択（照合は常にgemini-3.6-flash固定）",
-        options=[
-            "gpt-5.6-luna",
-            "gemini-3.5-flash-lite",
-            "gemini-3.6-flash",
-        ]
+# ✅ 修正③: タブを2つに分割。
+#    - タブ1「Google Places検索のみ」: Google Places APIの結果だけを見る（AI検証なし）
+#    - タブ2「AI検証（既存機能）」: 従来通りのGoogle Places + AI推薦 + 照合フル機能
+#    2つのタブは検索キーワードの入力欄を別々のwidget keyで管理しているため、
+#    タブを切り替えても検索語は共有されません。
+tab_places_only, tab_ai_verify = st.tabs(["🗺️ Google Places検索のみ", "🤖 AI検証（既存機能）"])
+
+
+# --------------------------------------------------
+# タブ1: Google Places APIの検索結果のみを表示
+# --------------------------------------------------
+with tab_places_only:
+    st.subheader("🗺️ Google Places検索のみ")
+    st.caption("AIによる推薦・照合は行わず、Google Places APIから取得した情報のみを表示します。")
+
+    places_only_query = st.text_input(
+        "検索キーワード",
+        placeholder="例: 浅草 焼肉 店",
+        key="places_only_query",
     )
 
-is_gpt_model = "gpt" in model_selection
+    if st.button("🔍 Google Places検索を実行", type="primary", key="places_only_search_btn"):
+        if not places_only_query or not places_only_query.strip():
+            st.warning("⚠️ 検索キーワードを入力してください！")
+        elif not GOOGLE_API_KEY:
+            st.error("⚠️ Streamlit Secrets に GOOGLE_API_KEY が設定されていません！")
+        else:
+            try:
+                with st.spinner('Google Places APIから場所情報を収集しています...'):
+                    df_places_only = get_google_places_data(places_only_query)
 
-default_rounds = 1 if is_gpt_model else 3
-num_rounds = st.slider(
-    "🔁 AI再検索の回数（1回でも🟢があれば最終🟢）",
-    min_value=1, max_value=5, value=default_rounds, step=1,
-    key=f"num_rounds_{model_selection}",
-    help="同じ検索キーワードでAIに複数回問い合わせます。"
-         "いずれか1回でも🟢判定が出れば最終的に🟢になります（OR方式）。"
-         "回数を増やすほど見逃し(false negative)は減りますが、API呼び出し回数とコスト・待ち時間も比例して増えます。"
-)
-if is_gpt_model:
-    st.caption("💡 ChatGPTモデルはデフォルト1回（トークン節約）。見逃しを減らしたい場合は回数を増やせます。")
-    st.caption("⚠️ 下記「注意」参照: OpenAI APIの回答はChatGPTアプリの回答と完全には一致しません。")
+                if df_places_only.empty:
+                    st.error("Googleの検索結果がありません。")
+                else:
+                    st.success(f"✅ 計 {len(df_places_only)} 件を取得しました。")
+                    st.dataframe(df_places_only, use_container_width=True)
 
-if st.button("🚀 検索および検証を実行", type="primary"):
-    if not search_query_input or not search_query_input.strip():
-        st.warning("⚠️ 検索キーワードを入力してください！ (검색어를 입력해 주세요!)")
-    elif not GOOGLE_API_KEY or not GEMINI_API_KEY or (is_gpt_model and not OPENAI_API_KEY):
-        st.error("⚠️ Streamlit Secrets に必要なAPIキーが設定されていません！"
-                  "（照合は常にGeminiを使うためGEMINI_API_KEYは必須、GPTモデル選択時はOPENAI_API_KEYも必要です）")
-    else:
-        try:
-            with st.spinner('1️⃣ Google Places APIから場所情報を収集しています...'):
-                df_google = get_google_places_data(search_query_input)
+                    buffer_places_only = io.BytesIO()
+                    with pd.ExcelWriter(buffer_places_only, engine='xlsxwriter') as writer:
+                        df_places_only.to_excel(writer, index=False, sheet_name='Google_Places')
 
-            if df_google.empty:
-                st.error("Googleの検索結果がありません。")
-            else:
-                ai_responses = []
-                round_columns = []
-                final_df = df_google.copy()
-
-                for i in range(num_rounds):
-                    round_no = i + 1
-                    round_col = f'{round_no}回目_判定'
-                    round_columns.append(round_col)
-
-                    with st.spinner(f'2️⃣-{round_no} {model_selection} がAI回答を生成中... ({round_no}/{num_rounds}回目)'):
-                        ai_text = get_ai_pure_recommendation(search_query_input, model_selection)
-                        ai_responses.append(ai_text)
-
-                    with st.spinner(f'3️⃣-{round_no} {JUDGE_MODEL} 審査員が照合中... ({round_no}/{num_rounds}回目)'):
-                        final_df, _ = match_lists_with_ai(
-                            final_df, ai_text, result_column=round_col
-                        )
-
-                col_final = f'最終判定(OR統合🟢/❌・{num_rounds}回中)'
-
-                vote_results = final_df.apply(lambda row: combine_rounds(row, round_columns), axis=1)
-                final_df[col_final] = vote_results.apply(lambda x: x[0])
-                final_df['一致率'] = vote_results.apply(lambda x: f"{x[1]}/{x[2]}" if x[2] > 0 else "N/A")
-
-                st.success(f"✅ 計 {len(final_df)} 件の検証が完了しました！（{num_rounds}回分をOR方式で統合済み：1回でも🟢なら🟢）")
-
-                split_df = final_df[final_df[round_columns].nunique(axis=1) > 1]
-                if not split_df.empty:
-                    st.info(f"ℹ️ {num_rounds}回の判定が割れた店舗が {len(split_df)} 件あります（最終的には🟢が1つでもあれば🟢として採用されています）。")
-
-                try:
-                    styled_df = final_df.style.apply(
-                        lambda row: highlight_matched_rows(row, col_final), axis=1
+                    st.download_button(
+                        label="📥 Excelファイルをダウンロード (.xlsx)",
+                        data=buffer_places_only.getvalue(),
+                        file_name=f"{places_only_query.replace(' ', '_')}_GooglePlaces結果.xlsx",
+                        mime="application/vnd.ms-excel",
+                        key="places_only_download_btn",
                     )
-                    st.dataframe(styled_df, use_container_width=True)
-                except Exception:
-                    st.dataframe(final_df, use_container_width=True)
+            except Exception as e:
+                st.error(f"エラーが発生しました: {e}")
+                st.exception(e)
 
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    final_df.to_excel(writer, index=False, sheet_name='AI_Verification')
 
-                st.download_button(
-                    label="📥 Excelファイルをダウンロード (.xlsx)",
-                    data=buffer.getvalue(),
-                    file_name=f"{search_query_input.replace(' ', '_')}_AI検証結果.xlsx",
-                    mime="application/vnd.ms-excel"
-                )
+# --------------------------------------------------
+# タブ2: 既存のAI検証フル機能（変更なし）
+# --------------------------------------------------
+with tab_ai_verify:
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        search_query_input = st.text_input(
+            "検索キーワード", placeholder="例: 浅草 焼肉 店", key="ai_verify_query"
+        )
+    with col2:
+        model_selection = st.selectbox(
+            "推薦リスト作成モデルを選択（照合は常にgemini-3.6-flash固定）",
+            options=[
+                "gpt-5.6-luna",
+                "gemini-3.5-flash-lite",
+                "gemini-3.6-flash",
+            ],
+            key="ai_verify_model_selection",
+        )
 
-                st.subheader("🤖 AIの実際の回答内容（回ごとの生テキスト）")
-                cols = st.columns(min(num_rounds, 3))
-                for i, ai_text in enumerate(ai_responses):
-                    with cols[i % len(cols)]:
-                        with st.expander(f"{i + 1}回目の回答"):
-                            st.info(ai_text)
+    is_gpt_model = "gpt" in model_selection
 
-                with st.spinner(f'4️⃣ {JUDGE_MODEL} が全{num_rounds}回分の回答から店舗名を整理中...'):
-                    shop_name_summary = summarize_shop_names_only(ai_responses)
+    default_rounds = 1 if is_gpt_model else 3
+    num_rounds = st.slider(
+        "🔁 AI再検索の回数（1回でも🟢があれば最終🟢）",
+        min_value=1, max_value=5, value=default_rounds, step=1,
+        key=f"num_rounds_{model_selection}",
+        help="同じ検索キーワードでAIに複数回問い合わせます。"
+             "いずれか1回でも🟢判定が出れば最終的に🟢になります（OR方式）。"
+             "回数を増やすほど見逃し(false negative)は減りますが、API呼び出し回数とコスト・待ち時間も比例して増えます。"
+    )
+    if is_gpt_model:
+        st.caption("💡 ChatGPTモデルはデフォルト1回（トークン節約）。見逃しを減らしたい場合は回数を増やせます。")
+        st.caption("⚠️ OpenAI APIの回答はChatGPTアプリの回答と完全には一致しません。")
 
-                st.divider()
-                st.subheader(f"🏪 店舗名のみ整理リスト（{num_rounds}回分の回答を統合・重複排除／{JUDGE_MODEL}）")
-                st.markdown(shop_name_summary)
+    if st.button("🚀 検索および検証を実行", type="primary", key="ai_verify_search_btn"):
+        if not search_query_input or not search_query_input.strip():
+            st.warning("⚠️ 検索キーワードを入力してください！ (검색어를 입력해 주세요!)")
+        elif not GOOGLE_API_KEY or not GEMINI_API_KEY or (is_gpt_model and not OPENAI_API_KEY):
+            st.error("⚠️ Streamlit Secrets に必要なAPIキーが設定されていません！"
+                      "（照合は常にGeminiを使うためGEMINI_API_KEYは必須、GPTモデル選択時はOPENAI_API_KEYも必要です）")
+        else:
+            try:
+                with st.spinner('1️⃣ Google Places APIから場所情報を収集しています...'):
+                    df_google = get_google_places_data(search_query_input)
 
-        except Exception as e:
-            st.error(f"エラーが発生しました: {e}")
-            st.exception(e)
+                if df_google.empty:
+                    st.error("Googleの検索結果がありません。")
+                else:
+                    ai_responses = []
+                    round_columns = []
+                    final_df = df_google.copy()
+
+                    for i in range(num_rounds):
+                        round_no = i + 1
+                        round_col = f'{round_no}回目_判定'
+                        round_columns.append(round_col)
+
+                        with st.spinner(f'2️⃣-{round_no} {model_selection} がAI回答を生成中... ({round_no}/{num_rounds}回目)'):
+                            ai_text = get_ai_pure_recommendation(search_query_input, model_selection)
+                            ai_responses.append(ai_text)
+
+                        with st.spinner(f'3️⃣-{round_no} {JUDGE_MODEL} 審査員が照合中... ({round_no}/{num_rounds}回目)'):
+                            final_df, _ = match_lists_with_ai(
+                                final_df, ai_text, result_column=round_col
+                            )
+
+                    col_final = f'最終判定(OR統合🟢/❌・{num_rounds}回中)'
+
+                    vote_results = final_df.apply(lambda row: combine_rounds(row, round_columns), axis=1)
+                    final_df[col_final] = vote_results.apply(lambda x: x[0])
+                    final_df['一致率'] = vote_results.apply(lambda x: f"{x[1]}/{x[2]}" if x[2] > 0 else "N/A")
+
+                    st.success(f"✅ 計 {len(final_df)} 件の検証が完了しました！（{num_rounds}回分をOR方式で統合済み：1回でも🟢なら🟢）")
+
+                    split_df = final_df[final_df[round_columns].nunique(axis=1) > 1]
+                    if not split_df.empty:
+                        st.info(f"ℹ️ {num_rounds}回の判定が割れた店舗が {len(split_df)} 件あります（最終的には🟢が1つでもあれば🟢として採用されています）。")
+
+                    try:
+                        styled_df = final_df.style.apply(
+                            lambda row: highlight_matched_rows(row, col_final), axis=1
+                        )
+                        st.dataframe(styled_df, use_container_width=True)
+                    except Exception:
+                        st.dataframe(final_df, use_container_width=True)
+
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                        final_df.to_excel(writer, index=False, sheet_name='AI_Verification')
+
+                    st.download_button(
+                        label="📥 Excelファイルをダウンロード (.xlsx)",
+                        data=buffer.getvalue(),
+                        file_name=f"{search_query_input.replace(' ', '_')}_AI検証結果.xlsx",
+                        mime="application/vnd.ms-excel",
+                        key="ai_verify_download_btn",
+                    )
+
+                    st.subheader("🤖 AIの実際の回答内容（回ごとの生テキスト）")
+                    cols = st.columns(min(num_rounds, 3))
+                    for i, ai_text in enumerate(ai_responses):
+                        with cols[i % len(cols)]:
+                            with st.expander(f"{i + 1}回目の回答"):
+                                st.info(ai_text)
+
+                    with st.spinner(f'4️⃣ {JUDGE_MODEL} が全{num_rounds}回分の回答から店舗名を整理中...'):
+                        shop_name_summary = summarize_shop_names_only(ai_responses)
+
+                    st.divider()
+                    st.subheader(f"🏪 店舗名のみ整理リスト（{num_rounds}回分の回答を統合・重複排除／{JUDGE_MODEL}）")
+                    st.markdown(shop_name_summary)
+
+            except Exception as e:
+                st.error(f"エラーが発生しました: {e}")
+                st.exception(e)
